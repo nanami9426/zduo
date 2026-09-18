@@ -22,8 +22,9 @@ enum Diagnostics {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let frame = try fixture()
         let renderer = try FoldRenderer()
-        let angles = [110.0, 85, 60, 30, 15]
+        let angles = [110.0, 109, 100, 85, 60, 30, 15, 8]
         var identityError = 0
+        var identity: [UInt8] = []
         var closingAt60: [UInt8] = []
         for angle in angles {
             let effect = FoldEffect.calculate(angle: angle, settings: FoldSettings())!
@@ -31,6 +32,7 @@ enum Diagnostics {
             let bytes = try renderer.renderDiagnostic(frame: frame, effect: effect, to: url)
             if angle == 60 { closingAt60 = bytes }
             if angle == 110 {
+                identity = bytes
                 CVPixelBufferLockBaseAddress(frame, .readOnly)
                 defer { CVPixelBufferUnlockBaseAddress(frame, .readOnly) }
                 let source = CVPixelBufferGetBaseAddress(frame)!.assumingMemoryBound(to: UInt8.self)
@@ -52,12 +54,17 @@ enum Diagnostics {
         let repeatURL = directory.appendingPathComponent("angle-60-reverse.png")
         let repeated = try renderer.renderDiagnostic(frame: frame, effect: same, to: repeatURL)
         guard repeated == closingAt60 else { throw CaptureError.message("反向回到相同角度时渲染不一致") }
-        print("PASS: identity max channel error = \(identityError); all frames opaque; deterministic reverse rendering")
+        let disabled = FoldEffect.calculate(angle: 15, settings: FoldSettings(strength: 0))!
+        let disabledBytes = try renderer.renderDiagnostic(frame: frame, effect: disabled,
+            to: directory.appendingPathComponent("zero-strength.png"))
+        guard disabledBytes == identity else { throw CaptureError.message("零强度仍残留变形或材质") }
+        try checkProjectionAndMaterial(renderer: renderer, directory: directory)
+        try checkSideFill(renderer: renderer, directory: directory)
+        print("PASS: identity max channel error = \(identityError); all frames opaque; deterministic reverse rendering; zero strength restores input")
         print("GPU:", renderer.device.name)
     }
 
-    private static func fixture() throws -> CVPixelBuffer {
-        let width = 960, height = 600
+    private static func makeFrame(width: Int, height: Int) throws -> CVPixelBuffer {
         var frame: CVPixelBuffer?
         let attributes: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -67,6 +74,115 @@ enum Diagnostics {
                                   attributes as CFDictionary, &frame) == kCVReturnSuccess, let frame else {
             throw CaptureError.message("无法创建测试画面")
         }
+        return frame
+    }
+
+    private static func checkProjectionAndMaterial(renderer: FoldRenderer, directory: URL) throws {
+        let width = 960, height = 600
+        let frame = try makeFrame(width: width, height: height)
+        CVPixelBufferLockBaseAddress(frame, [])
+        let pixels = CVPixelBufferGetBaseAddress(frame)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(frame)
+        // 红、绿分别编码参考平面的 x/y 坐标，验证 shader 的实际采样方向和 uniform 布局。
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = y * stride + x * 4
+                pixels[index] = 40
+                pixels[index + 1] = UInt8(((1 - (Double(y) + 0.5) / Double(height)) * 255).rounded())
+                pixels[index + 2] = UInt8(((Double(x) + 0.5) / Double(width) * 255).rounded())
+                pixels[index + 3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(frame, [])
+        var projectionError = 0
+        for angle in [100.0, 85, 60, 30, 15, 8] {
+            let effect = FoldEffect.calculate(angle: angle, settings: FoldSettings())!
+            let bytes = try renderer.renderDiagnostic(frame: frame, effect: effect,
+                to: directory.appendingPathComponent("coordinates-\(Int(angle)).png"), materialEnabled: false)
+            for x in [width * 35 / 100, width / 2, width * 65 / 100] {
+                for y in [height / 20, height / 4, height / 2, height * 3 / 4, height * 19 / 20] {
+                    let source = effect.sourceCoordinate(x: (Double(x) + 0.5) / Double(width),
+                        yFromHinge: 1 - (Double(y) + 0.5) / Double(height))
+                    let index = (y * width + x) * 4
+                    projectionError = max(projectionError, abs(Int(bytes[index + 2]) - Int((source.x * 255).rounded())),
+                                          abs(Int(bytes[index + 1]) - Int((source.y * 255).rounded())))
+                }
+            }
+        }
+        guard projectionError <= 2 else { throw CaptureError.message("CPU/GPU 投影不一致，通道误差 \(projectionError)") }
+
+        // 暗灰底图隔离材质本身，与 22:44 版本的冷灰渐变参考值比较。
+        CVPixelBufferLockBaseAddress(frame, [])
+        for y in 0..<height {
+            for x in 0..<width {
+                let index = y * stride + x * 4
+                for channel in 0..<3 { pixels[index + channel] = 64 }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(frame, [])
+        let effect = FoldEffect.calculate(angle: 60, settings: FoldSettings())!
+        let gray = try renderer.renderDiagnostic(frame: frame, effect: effect,
+            to: directory.appendingPathComponent("frost-gray.png"))
+        let row = (width * 2 / 5..<width * 3 / 5).map { Double(gray[(60 * width + $0) * 4 + 1]) }
+        let mean = row.reduce(0, +) / Double(row.count)
+        let variance = row.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(row.count)
+        // 参考值来自旧 shader 在 64/255 灰底、60° 下的绿色通道，覆盖顶部到铰链。
+        let expectedGradient: [(row: Int, mean: Double)] = [(60, 97.99), (180, 88.61), (300, 76.88), (480, 64.59), (599, 62.45)]
+        var gradientError = 0.0
+        for sample in expectedGradient {
+            let values = (width * 2 / 5..<width * 3 / 5).map { Double(gray[(sample.row * width + $0) * 4 + 1]) }
+            let rowMean = values.reduce(0, +) / Double(values.count)
+            gradientError = max(gradientError, abs(rowMean - sample.mean))
+        }
+        guard gradientError < 1.2, variance > 0.01, variance < 2 else {
+            throw CaptureError.message("旧版磨砂渐变不一致：mean error=\(gradientError), variance=\(variance)")
+        }
+        print("PASS: CPU/GPU projection max channel error = \(projectionError); classic frost gradient mean error = \(gradientError); top mean = \(mean), variance = \(variance)")
+    }
+
+    private static func checkSideFill(renderer: FoldRenderer, directory: URL) throws {
+        let width = 960, height = 600
+        let frame = try makeFrame(width: width, height: height)
+        CVPixelBufferLockBaseAddress(frame, [])
+        let pixels = CVPixelBufferGetBaseAddress(frame)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(frame)
+        // 两侧贴边细线模拟侧栏文字。旧 clamp_to_edge 会将每一条亮线横向复制到整个图外区域。
+        for y in 0..<height {
+            for x in 0..<width {
+                let isLine = (x < 100 || x >= width - 100) && y % 20 < 3
+                let index = y * stride + x * 4
+                for channel in 0..<3 { pixels[index + channel] = isLine ? 235 : 32 }
+                pixels[index + 3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(frame, [])
+        _ = try renderer.renderDiagnostic(frame: frame, effect: .identity,
+            to: directory.appendingPathComponent("sidebar-input.png"))
+        var maxSideStripe = 0.0
+        // 覆盖用户截图的 118° → 108°，以及更大收窄角度；检查左右两侧，防止只修左侧。
+        for angle in [108.0, 85, 60] {
+            let effect = FoldEffect.calculate(angle: angle, settings: FoldSettings(referenceAngle: 118))!
+            let bytes = try renderer.renderDiagnostic(frame: frame, effect: effect,
+                to: directory.appendingPathComponent("sidebar-\(Int(angle)).png"))
+            for x in [4, width - 5] {
+                // 用邻近行估计平滑渐变，只检查高频条纹，避免把恢复的磨砂渐变误判成拖尾。
+                for y in 80..<240 {
+                    let value = Double(bytes[(y * width + x) * 4 + 1])
+                    let above = Double(bytes[((y - 5) * width + x) * 4 + 1])
+                    let below = Double(bytes[((y + 5) * width + x) * 4 + 1])
+                    maxSideStripe = max(maxSideStripe, abs(value - (above + below) / 2))
+                }
+            }
+        }
+        guard maxSideStripe <= 12 else {
+            throw CaptureError.message("侧边填充仍出现文字条纹，残差 \(maxSideStripe)/255")
+        }
+        print("PASS: side fill has no stretched text stripes; max stripe residual = \(maxSideStripe)/255")
+    }
+
+    private static func fixture() throws -> CVPixelBuffer {
+        let width = 960, height = 600
+        let frame = try makeFrame(width: width, height: height)
         CVPixelBufferLockBaseAddress(frame, [])
         defer { CVPixelBufferUnlockBaseAddress(frame, []) }
         guard let context = CGContext(data: CVPixelBufferGetBaseAddress(frame), width: width, height: height,

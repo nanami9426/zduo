@@ -28,6 +28,7 @@ struct FoldCoreTests {
 
     @Test func testDepthIncreasesAwayFromHinge() throws {
         let effect = try #require(FoldEffect.calculate(angle: 55, settings: FoldSettings()))
+        #expect(effect.blurWeight(distanceFromHinge: 0) == effect.blur * 0.12)
         #expect(effect.blurWeight(distanceFromHinge: 0) < effect.blurWeight(distanceFromHinge: 0.5))
         #expect(effect.blurWeight(distanceFromHinge: 0.5) < effect.blurWeight(distanceFromHinge: 1))
         #expect(effect.blurWeight(distanceFromHinge: 1) == effect.blur)
@@ -60,9 +61,59 @@ struct FoldCoreTests {
                 #expect(point.y > previousY)
                 previousY = point.y
             }
-            // 每侧最多约 11.54% 的收窄，不允许退化为很窄的卡片。
-            let edge = effect.sourceCoordinate(x: 0.5 - 0.5 / (1 + 0.30 * effect.closure), yFromHinge: 1)
+            // 对齐 Hinge：最窄保留约 76.9% 的宽度，避免强收窄产生画面一起移动的感觉。
+            let width = 1 - effect.projectionDepth
+            #expect(width > 0.76)
+            let edge = effect.sourceCoordinate(x: 0.5 - 0.5 * width, yFromHinge: 1)
             #expect(abs(edge.x) < 0.000001)
+        }
+    }
+
+    @Test func testProjectionMatchesHingeReferenceSamples() throws {
+        // 独立记录 Hinge shader 在 25% / 50% / 75% / 100% 进度的采样值，防止再改成强透视。
+        let samples: [(progress: Double, width: Double, top: Double, x: Double, y: Double)] = [
+            (0.25, 0.930232558140, 0.967599092360, 0.240963855422, 0.466312815595),
+            (0.50, 0.869565217391, 0.872496007073, 0.232558139535, 0.405812096313),
+            (0.75, 0.816326530612, 0.720853596703, 0.224719101124, 0.323979144586),
+            (1.00, 0.769230769231, 0.522498564716, 0.217391304348, 0.227173289007)
+        ]
+        for sample in samples {
+            let effect = try #require(FoldEffect.calculate(angle: 110 - 102 * sample.progress, settings: FoldSettings()))
+            let point = effect.sourceCoordinate(x: 0.25, yFromHinge: 0.5)
+            #expect(abs(1 - effect.projectionDepth - sample.width) < 1e-9)
+            #expect(abs(effect.sourceHeight - sample.top) < 1e-9)
+            #expect(abs(point.x - sample.x) < 1e-9 && abs(point.y - sample.y) < 1e-9)
+        }
+    }
+
+    @Test func testClassicFrostKeepsItsOriginalAngleCurve() throws {
+        let middle = try #require(FoldEffect.calculate(angle: 62.5, settings: FoldSettings()))
+        #expect(middle.blur == 0.5)
+        let nearlyClosed = try #require(FoldEffect.calculate(angle: 15, settings: FoldSettings()))
+        #expect(nearlyClosed.blur == 1)
+        #expect(nearlyClosed.closure < 1)
+        let closed = try #require(FoldEffect.calculate(angle: 8, settings: FoldSettings()))
+        #expect(closed.closure == 1)
+    }
+
+    @Test func testProjectionIsStableAcrossReferenceAnglesAndStrengths() throws {
+        for reference in [30.0, 60, 110, 150] {
+            for strength in [0.0, 0.25, 0.5, 1] {
+                var previous = 1.0
+                for angle in stride(from: reference, through: 0, by: -1) {
+                    let effect = try #require(FoldEffect.calculate(
+                        angle: angle, settings: FoldSettings(referenceAngle: reference, strength: strength)))
+                    let top = effect.sourceCoordinate(x: 0.2, yFromHinge: 1)
+                    let bottom = effect.sourceCoordinate(x: 0.2, yFromHinge: 0)
+                    #expect(top.x.isFinite && top.y > 0 && top.y <= previous + 1e-12)
+                    #expect(abs(bottom.x - 0.2) < 1e-12 && bottom.y == 0)
+                    if strength == 0 {
+                        #expect(abs(top.x - 0.2) < 1e-12 && top.y == 1)
+                        #expect(effect.blur == 0)
+                    }
+                    previous = top.y
+                }
+            }
         }
     }
 

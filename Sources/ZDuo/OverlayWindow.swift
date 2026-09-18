@@ -5,7 +5,6 @@ final class OverlayWindow: NSWindow {
     let metalView: MTKView
     let renderer: FoldRenderer
     static let effectLevel = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue - 2)
-    static let controlLevel = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue - 1)
 
     init(screen: NSScreen, renderer: FoldRenderer) {
         self.renderer = renderer

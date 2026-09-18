@@ -51,6 +51,7 @@ final class AppModel: ObservableObject {
     private var resumeAfter = Date.distantPast
     private var captureError: String?
     private var menuOpen = false
+    private var controlsActive = false
     private var renderer: FoldRenderer?
     private var overlay: OverlayWindow?
     private var capture: DesktopCapture?
@@ -126,9 +127,20 @@ final class AppModel: ObservableObject {
 
     func setMenuOpen(_ value: Bool) {
         menuOpen = value
-        // 原生菜单不参与变形，展开菜单时临时透出真实桌面，确保菜单可见且点击对齐。
-        if value { overlay?.alphaValue = 0 }
-        else if overlayVisible { overlay?.reveal() }
+        updateOverlayVisibility()
+    }
+
+    func setControlsActive(_ value: Bool) {
+        controlsActive = value
+        updateOverlayVisibility()
+    }
+
+    private func updateOverlayVisibility() {
+        guard overlayVisible else { return }
+        // 菜单和设置窗口独立控制；关闭菜单时若仍在编辑设置，不能提前恢复覆盖。
+        if menuOpen || controlsActive { overlay?.alphaValue = 0 }
+        else { overlay?.reveal() }
+        setStatus(controlsActive ? "调整设置中 · 收起窗口以预览" : "实时景深 · 内置屏幕")
     }
 
     func shutdown() {
@@ -225,11 +237,10 @@ final class AppModel: ObservableObject {
             let token = generation
             renderer.mailbox = session.mailbox
             renderer.effect = effect
-            renderer.onFirstPresentation = { [weak self, weak window] in
+            renderer.onFirstPresentation = { [weak self] in
                 guard let self, self.generation == token, self.enabled else { return }
-                if !self.menuOpen { window?.reveal() }
                 self.overlayVisible = true
-                self.setStatus("实时景深 · 内置屏幕")
+                self.updateOverlayVisibility()
             }
             renderer.onFPS = { [weak self] fps in self?.fps = fps }
             renderer.onFailure = { [weak self] message in

@@ -6,6 +6,8 @@ Source: https://github.com/Noveum/hinge
 
 ZDuo adapts the full-height taper and top-crop projection from Resources/Fold.metal, described in MOTION.md (retrieved 2026-09-18). The adapted equations are in Sources/FoldCore/FoldEffect.swift and Sources/ZDuo/Resources/Fold.metal.
 
+The current adaptation matches Hinge's 0.30 taper and 0.65 crop-angle factor, using the equivalent depth = taper / (1 + taper) form. Nominal geometry progress ends at 8 degrees; ZDuo retains its own sensor smoothing. ZDuo's historical frost material and separate screen-space scattering pass are applied on top. Material research references (Microsoft Acrylic and Glur) are linked in README.md; their source code is not incorporated.
+
 MIT License
 
 Copyright (c) 2026 Noveum.ai

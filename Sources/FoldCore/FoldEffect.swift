@@ -18,15 +18,24 @@ public struct FoldEffect: Equatable {
 
     public static let identity = FoldEffect(progress: 0, closure: 0, blur: 0)
 
+    // 对齐 Hinge 的原始投影：taper = 0.30 × progress，裁剪角为 0.65 × 90°。
+    // depth = taper / (1 + taper)，使现有 shader 的齐次坐标与 Hinge 的 q 公式等价。
+    public var projectionDepth: Double {
+        let taper = 0.30 * closure
+        return taper / (1 + taper)
+    }
+    public var sourceHeight: Double { cos(closure * .pi / 2 * 0.65) }
+
     public static func calculate(angle: Double, settings: FoldSettings) -> FoldEffect? {
         guard angle.isFinite, (0...180).contains(angle),
               settings.referenceAngle.isFinite, (30...150).contains(settings.referenceAngle),
               settings.strength.isFinite, (0...1).contains(settings.strength) else { return nil }
 
         let difference = max(0, settings.referenceAngle - angle)
-        let progress = min(1, difference / (settings.referenceAngle - 15))
-        let eased = progress * progress * (3 - 2 * progress)
-        // closure 是带强度的合盖进度，不再把物理开合重复施加为虚拟卡片旋转。
+        // 几何采用 Hinge 的 8° 合盖终点；材质单独保留 22:44 版本的 15° 渐变节奏。
+        let progress = min(1, difference / (settings.referenceAngle - 8))
+        let frostProgress = min(1, difference / (settings.referenceAngle - 15))
+        let eased = frostProgress * frostProgress * (3 - 2 * frostProgress)
         return FoldEffect(progress: progress,
                           closure: progress * settings.strength,
                           blur: eased * settings.strength)
@@ -39,12 +48,10 @@ public struct FoldEffect: Equatable {
 
     /// 与 shader 相同的逆投影，用于检验参考角度处恒等、铰链固定和数值稳定。
     public func sourceCoordinate(x: Double, yFromHinge: Double) -> (x: Double, y: Double) {
-        // 参考 Hinge 的满高度投影（MIT，见 THIRD_PARTY_NOTICES.md）。
-        // 顶部轻微收窄；从铰链向上截取原图，避免整幅桌面被压低成向后倒的卡片。
-        let v = 1 - yFromHinge
-        let taper = 0.30 * closure
-        let q = (1 + taper) / (1 + taper * v)
-        let y = cos(closure * .pi / 2 * 0.65) * (1 - v * q)
+        // 采用 Hinge 的满高度投影（MIT，见 THIRD_PARTY_NOTICES.md），保持轻微收窄。
+        // q 在底部为 1，顶部随距离增大；高度归一化后只裁上部，不在顶边露出空洞。
+        let q = 1 / (1 - projectionDepth * yFromHinge)
+        let y = sourceHeight * yFromHinge * (1 - projectionDepth) * q
         let x = 0.5 + (x - 0.5) * q
         return (x, y)
     }

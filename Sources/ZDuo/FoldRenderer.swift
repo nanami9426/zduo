@@ -7,6 +7,8 @@ import FoldCore
 struct FoldUniforms {
     var closure: Float = 0
     var blur: Float = 0
+    var projectionDepth: Float = 0
+    var sourceHeight: Float = 1
     var width: Float = 0
     var height: Float = 0
 }
@@ -15,13 +17,18 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
+    private let projectionPipeline: MTLRenderPipelineState
     private let scale: MPSImageLanczosScale
     private var textureCache: CVMetalTextureCache!
     private var cvTexture: CVMetalTexture?
     private var pixelBuffer: CVPixelBuffer?
     private var pendingFrame: CVPixelBuffer?
     private var sharp: MTLTexture?
+    private var projected: MTLTexture?
     private var reduced: MTLTexture?
+    private var backdrop: MTLTexture?
+    private var backdropFilter: MPSImageGaussianBlur?
+    private var backdropNeedsUpdate = true
     private var blurred: [MTLTexture] = []
     private var filters: [MPSImageGaussianBlur] = []
     private let inFlight = DispatchSemaphore(value: 3)
@@ -55,6 +62,8 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         descriptor.fragmentFunction = library.makeFunction(name: "foldFragment")
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        descriptor.fragmentFunction = library.makeFunction(name: "foldProjectionFragment")
+        projectionPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         scale = MPSImageLanczosScale(device: device)
         super.init()
         guard CVMetalTextureCacheCreate(nil, nil, device, nil, &textureCache) == kCVReturnSuccess else {
@@ -69,7 +78,11 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         pendingFrame = nil
         cvTexture = nil
         sharp = nil
+        projected = nil
         reduced = nil
+        backdrop = nil
+        backdropFilter = nil
+        backdropNeedsUpdate = true
         blurred = []
         filters = []
         lastUniforms = nil
@@ -89,13 +102,15 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         let frame = pendingFrame
         let uniforms = makeUniforms()
         if frame == nil, let previous = lastUniforms,
-           previous.closure == uniforms.closure, previous.blur == uniforms.blur, firstPresented { return }
+           previous.closure == uniforms.closure, previous.blur == uniforms.blur,
+           previous.width == uniforms.width, previous.height == uniforms.height, firstPresented { return }
         guard frame != nil || sharp != nil else { return }
         guard let drawable = view.currentDrawable,
               let pass = view.currentRenderPassDescriptor,
               let command = commandQueue.makeCommandBuffer() else { return }
         do {
-            if let frame { try prepare(frame: frame, command: command); pendingFrame = nil }
+            if let frame { try prepare(frame: frame); pendingFrame = nil }
+            try prepareProjection(command: command, uniforms: uniforms)
             try encode(pass: pass, command: command, uniforms: uniforms)
         } catch {
             onFailure?(error.localizedDescription)
@@ -130,14 +145,16 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         }
         submitted = true
         command.commit()
+        backdropNeedsUpdate = false
     }
 
     private func makeUniforms() -> FoldUniforms {
         FoldUniforms(closure: Float(effect.closure), blur: Float(effect.blur),
+                     projectionDepth: Float(effect.projectionDepth), sourceHeight: Float(effect.sourceHeight),
                      width: Float(pointSize.width), height: Float(pointSize.height))
     }
 
-    private func prepare(frame: CVPixelBuffer, command: MTLCommandBuffer) throws {
+    private func prepare(frame: CVPixelBuffer) throws {
         let width = CVPixelBufferGetWidth(frame)
         let height = CVPixelBufferGetHeight(frame)
         var reference: CVMetalTexture?
@@ -149,6 +166,22 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         pixelBuffer = frame
         cvTexture = reference
         sharp = texture
+        backdropNeedsUpdate = true
+    }
+
+    private func prepareProjection(command: MTLCommandBuffer, uniforms: FoldUniforms) throws {
+        guard let sharp else { throw CaptureError.message("缺少桌面帧") }
+        let width = sharp.width, height = sharp.height
+        if projected?.width != width || projected?.height != height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.renderTarget, .shaderRead]
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                throw CaptureError.message("无法分配透视纹理")
+            }
+            projected = texture
+        }
 
         let reducedWidth = min(1280, width)
         let reducedHeight = max(1, Int(Double(height) * Double(reducedWidth) / Double(width)))
@@ -161,42 +194,83 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
                 throw CaptureError.message("无法分配模糊纹理")
             }
             self.reduced = reduced
+            guard let backdrop = device.makeTexture(descriptor: descriptor) else {
+                throw CaptureError.message("无法分配侧边背景纹理")
+            }
+            self.backdrop = backdrop
+            backdropNeedsUpdate = true
             blurred = try (0..<3).map { _ in
                 guard let texture = device.makeTexture(descriptor: descriptor) else {
                     throw CaptureError.message("GPU 内存不足")
                 }
                 return texture
             }
-            let pixelScale = Float(reducedHeight) / Float(max(1, pointSize.height))
-            filters = [Float(4), 12, 28].map {
-                let filter = MPSImageGaussianBlur(device: device, sigma: max(0.1, $0 * pixelScale))
+        }
+        // 恢复 22:44 版本的 4 / 12 / 28 pt 档位，保留屏幕空间散射和缩放一致性。
+        let pixelScale = Float(reducedHeight) / Float(max(1, pointSize.height))
+        let sigmas = [Float(4), 12, 28].map { max(0.1, $0 * pixelScale) }
+        if filters.map(\.sigma) != sigmas {
+            filters = sigmas.map {
+                let filter = MPSImageGaussianBlur(device: device, sigma: $0)
                 filter.edgeMode = .clamp
                 return filter
             }
         }
-        guard let reduced else { return }
-        // 每个捕获帧只做一次模糊；角度更新只重投影和混合，降低 60 Hz 渲染负担。
-        scale.encode(commandBuffer: command, sourceTexture: texture, destinationTexture: reduced)
+        let backdropSigma = max(0.1, 36 * pixelScale)
+        if backdropFilter?.sigma != backdropSigma {
+            let filter = MPSImageGaussianBlur(device: device, sigma: backdropSigma)
+            filter.edgeMode = .clamp
+            backdropFilter = filter
+            backdropNeedsUpdate = true
+        }
+        guard let projected, let reduced, let backdrop, let backdropFilter else {
+            throw CaptureError.message("缺少磨砂纹理")
+        }
+        // 图外背景先独立做宽模糊，不再把桌面边缘的一列文字拉满空白区域。
+        // 只在新捕获帧或尺寸变化时更新；下方继续复用 reduced 作为屏幕空间散射的临时纹理。
+        if backdropNeedsUpdate {
+            scale.encode(commandBuffer: command, sourceTexture: sharp, destinationTexture: reduced)
+            backdropFilter.encode(commandBuffer: command, sourceTexture: reduced, destinationTexture: backdrop)
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = projected
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+            throw CaptureError.message("无法创建透视渲染指令")
+        }
+        var uniforms = uniforms
+        encoder.setRenderPipelineState(projectionPipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FoldUniforms>.stride, index: 0)
+        encoder.setFragmentTexture(sharp, index: 0)
+        encoder.setFragmentTexture(backdrop, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+
+        // 先透视后散射，模糊半径才属于物理屏幕，合盖时不会被拉成长条。
+        // 有新帧或角度变化才重算；纹理和 MPS kernel 复用，模糊仍限制在 1280 px 内。
+        scale.encode(commandBuffer: command, sourceTexture: projected, destinationTexture: reduced)
         for index in 0..<3 {
             filters[index].encode(commandBuffer: command, sourceTexture: reduced, destinationTexture: blurred[index])
         }
     }
 
     private func encode(pass: MTLRenderPassDescriptor, command: MTLCommandBuffer, uniforms: FoldUniforms) throws {
-        guard let sharp, blurred.count == 3, let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+        guard let projected, blurred.count == 3, let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
             throw CaptureError.message("无法创建 GPU 渲染指令")
         }
         var uniforms = uniforms
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FoldUniforms>.stride, index: 0)
-        encoder.setFragmentTexture(sharp, index: 0)
+        encoder.setFragmentTexture(projected, index: 0)
         for index in 0..<3 { encoder.setFragmentTexture(blurred[index], index: index + 1) }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
     }
 
     /// 使用自建测试图离屏渲染，可在未授权屏幕录制时检验真实 GPU shader。
-    func renderDiagnostic(frame: CVPixelBuffer, effect: FoldEffect, to url: URL) throws -> [UInt8] {
+    func renderDiagnostic(frame: CVPixelBuffer, effect: FoldEffect, to url: URL,
+                          materialEnabled: Bool = true) throws -> [UInt8] {
         self.effect = effect
         let width = CVPixelBufferGetWidth(frame)
         let height = CVPixelBufferGetHeight(frame)
@@ -207,13 +281,18 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let output = device.makeTexture(descriptor: descriptor),
               let command = commandQueue.makeCommandBuffer() else { throw CaptureError.message("GPU 不可用") }
-        try prepare(frame: frame, command: command)
+        try prepare(frame: frame)
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = output
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
-        try encode(pass: pass, command: command, uniforms: makeUniforms())
+        var uniforms = makeUniforms()
+        // 几何检查关闭材质后与坐标色卡对照，避免模糊、反射掩盖逆投影错误。
+        if !materialEnabled { uniforms.blur = 0 }
+        try prepareProjection(command: command, uniforms: uniforms)
+        try encode(pass: pass, command: command, uniforms: uniforms)
         command.commit()
+        backdropNeedsUpdate = false
         command.waitUntilCompleted()
         guard command.status == .completed else { throw command.error ?? CaptureError.message("GPU 检查失败") }
         var bytes = [UInt8](repeating: 0, count: width * height * 4)

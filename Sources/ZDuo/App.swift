@@ -25,10 +25,10 @@ enum ZDuoMain {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     private let model = AppModel()
     private var statusItem: NSStatusItem!
-    private var panel: NSPanel!
+    private var panel: NSWindow!
     private var hotKey: GlobalHotKey?
     private var subscriptions: Set<AnyCancellable> = []
 
@@ -42,9 +42,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.onStatusChange = { [weak self] in self?.updateStatusItem() }
         model.$rawAngle.removeDuplicates().sink { [weak self] _ in
             DispatchQueue.main.async { self?.updateStatusItem() }
-        }.store(in: &subscriptions)
-        model.$overlayVisible.removeDuplicates().sink { [weak self] visible in
-            self?.panel.level = visible ? OverlayWindow.controlLevel : .floating
         }.store(in: &subscriptions)
         model.start()
         showPanel()
@@ -80,16 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func buildPanel() {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 680),
-            styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
         panel.title = "ZDuo"
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isReleasedWhenClosed = false
-        panel.isFloatingPanel = true
-        panel.hidesOnDeactivate = false
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // 设置界面参与普通窗口排序，不置顶，也不跟随所有桌面和其他应用的全屏空间。
+        panel.level = .normal
+        panel.delegate = self
         panel.backgroundColor = NSColor(red: 0.067, green: 0.075, blue: 0.10, alpha: 1)
         panel.appearance = NSAppearance(named: .darkAqua)
         let view = ControlPanel(model: model) { [weak self] in self?.panel.orderOut(nil) }
@@ -101,8 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func showPanel() {
         NSApp.activate(ignoringOtherApps: true)
+        if panel.isMiniaturized { panel.deminiaturize(nil) }
         panel.makeKeyAndOrderFront(nil)
     }
+
+    // 编辑设置时临时透出真实桌面，让普通层级的窗口仍能正常显示和点击。
+    func windowDidBecomeKey(_ notification: Notification) { model.setControlsActive(true) }
+    func windowDidResignKey(_ notification: Notification) { model.setControlsActive(false) }
+    func windowWillClose(_ notification: Notification) { model.setControlsActive(false) }
 
     private func updateStatusItem() {
         let angle = model.rawAngle.map { " \(Int($0))°" } ?? ""
@@ -126,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusItem.menu = menu
             statusItem.button?.performClick(nil)
             statusItem.menu = nil
-        } else if panel.isVisible {
+        } else if panel.isVisible && panel.isKeyWindow {
             panel.orderOut(nil)
         } else { showPanel() }
     }
