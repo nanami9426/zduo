@@ -76,7 +76,7 @@ final class LidSensor {
         var count = bytes.count
         let result = IOHIDDeviceGetReport(device, kIOHIDReportTypeFeature, 1, &bytes, &count)
         if result == kIOReturnSuccess, let angle = LidReport.decode(Array(bytes.prefix(max(0, min(count, 8))))) {
-            onReading?(angle, "已连接 · 30 Hz")
+            onReading?(angle, "已连接 · 30 Hz 轮询")
         } else {
             onReading?(nil, "传感器读取失败，正在重连")
             disconnect()

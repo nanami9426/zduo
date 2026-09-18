@@ -19,8 +19,8 @@ struct FoldCoreTests {
         for angle in stride(from: 110.0, through: 0, by: -0.5) {
             let effect = try #require(FoldEffect.calculate(angle: angle, settings: FoldSettings()))
             #expect(effect.blur >= previous.blur)
-            #expect(effect.rotation >= previous.rotation)
-            #expect(effect.rotation <= 55 * .pi / 180)
+            #expect(effect.closure >= previous.closure)
+            #expect(effect.closure <= 1)
             #expect(effect.blur <= 1)
             previous = effect
         }
@@ -41,7 +41,28 @@ struct FoldCoreTests {
             #expect(bottom.y == 0)
             let top = effect.sourceCoordinate(x: 0.1, yFromHinge: 1)
             #expect(top.x.isFinite && top.y.isFinite)
-            #expect(top.y >= 1 - 0.000001)
+            #expect(top.y > 0.5 && top.y <= 1)
+        }
+    }
+
+    @Test func testContentFillsHeightWithoutBackwardCardCollapse() throws {
+        var previousTop = 1.0
+        for angle in stride(from: 110.0, through: 15, by: -1) {
+            let effect = try #require(FoldEffect.calculate(angle: angle, settings: FoldSettings()))
+            let top = effect.sourceCoordinate(x: 0.5, yFromHinge: 1)
+            // 顶部采样逐渐下移到原图内部；旧投影会采到图外并制造一大片顶部填充。
+            #expect(top.y <= previousTop)
+            previousTop = top.y
+            var previousY = -1.0
+            for row in 0...100 {
+                let point = effect.sourceCoordinate(x: 0.5, yFromHinge: Double(row) / 100)
+                #expect(point.y >= 0 && point.y <= 1)
+                #expect(point.y > previousY)
+                previousY = point.y
+            }
+            // 每侧最多约 11.54% 的收窄，不允许退化为很窄的卡片。
+            let edge = effect.sourceCoordinate(x: 0.5 - 0.5 / (1 + 0.30 * effect.closure), yFromHinge: 1)
+            #expect(abs(edge.x) < 0.000001)
         }
     }
 
@@ -76,6 +97,51 @@ struct FoldCoreTests {
         #expect(smoother.update(target: .nan, deltaTime: 0.1) == nil)
         smoother.reset()
         #expect(smoother.update(target: 90, deltaTime: 0) == 90)
+    }
+
+    @Test func testMovingLidTracksWithinTwoDegreesAndReversesPromptly() throws {
+        // 用 90°/s 连续合盖检查实际跟随误差，避免只测最终能否收敛。
+        for hz in [30.0, 60.0, 120.0] {
+            var smoother = AngleSmoother()
+            _ = smoother.update(target: 110, deltaTime: 0)
+            var target = 110.0
+            var value = 110.0
+            for _ in 0..<Int(hz / 2) {
+                target -= 90 / hz
+                let updated = smoother.update(target: target, deltaTime: 1 / hz)
+                value = try #require(updated)
+                #expect(value >= target && value - target < 2)
+            }
+            let beforeReversal = value
+            for _ in 0..<3 {
+                target += 90 / hz
+                let opening = smoother.update(target: target, deltaTime: 1 / hz)
+                let reversed = try #require(opening)
+                #expect(reversed >= min(value, target) && reversed <= max(value, target))
+                value = reversed
+            }
+            #expect(value > beforeReversal)
+            for _ in 0..<Int(hz / 4) {
+                let updated = smoother.update(target: target, deltaTime: 1 / hz)
+                value = try #require(updated)
+            }
+            #expect(abs(value - target) < 0.01)
+        }
+    }
+
+    @Test func testQuantizedSlowMovementSpreadsStepsAcrossFrames() throws {
+        var smoother = AngleSmoother()
+        _ = smoother.update(target: 110, deltaTime: 0)
+        var previous = 110.0
+        // 模拟整数传感器缓慢开合，每六个显示帧才降低一度。
+        for frame in 1...60 {
+            let target = 110 - Double((frame + 5) / 6)
+            let updated = smoother.update(target: target, deltaTime: 1.0 / 60)
+            let value = try #require(updated)
+            #expect(previous - value < 0.5)
+            #expect(value >= target)
+            previous = value
+        }
     }
 
     @Test func testSensorReportDecoding() {

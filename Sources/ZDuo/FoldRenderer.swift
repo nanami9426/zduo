@@ -5,7 +5,7 @@ import CoreVideo
 import FoldCore
 
 struct FoldUniforms {
-    var rotation: Float = 0
+    var closure: Float = 0
     var blur: Float = 0
     var width: Float = 0
     var height: Float = 0
@@ -89,7 +89,7 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
         let frame = pendingFrame
         let uniforms = makeUniforms()
         if frame == nil, let previous = lastUniforms,
-           previous.rotation == uniforms.rotation, previous.blur == uniforms.blur, firstPresented { return }
+           previous.closure == uniforms.closure, previous.blur == uniforms.blur, firstPresented { return }
         guard frame != nil || sharp != nil else { return }
         guard let drawable = view.currentDrawable,
               let pass = view.currentRenderPassDescriptor,
@@ -133,7 +133,7 @@ final class FoldRenderer: NSObject, MTKViewDelegate {
     }
 
     private func makeUniforms() -> FoldUniforms {
-        FoldUniforms(rotation: Float(effect.rotation), blur: Float(effect.blur),
+        FoldUniforms(closure: Float(effect.closure), blur: Float(effect.blur),
                      width: Float(pointSize.width), height: Float(pointSize.height))
     }
 

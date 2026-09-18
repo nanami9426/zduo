@@ -12,6 +12,7 @@ cp "$ZDUO_BIN/ZDuo" "$ZDUO_APP/Contents/MacOS/ZDuo"
 cp "$ZDUO_ROOT/Support/Info.plist" "$ZDUO_APP/Contents/Info.plist"
 # 应用包独立携带 shader，不依赖构建目录中的 SwiftPM 资源路径。
 cp "$ZDUO_ROOT/Sources/ZDuo/Resources/Fold.metal" "$ZDUO_APP/Contents/Resources/Fold.metal"
+cp "$ZDUO_ROOT/THIRD_PARTY_NOTICES.md" "$ZDUO_APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 codesign --force --sign - --identifier app.zduo.demo "$ZDUO_APP"
 codesign --verify --strict "$ZDUO_APP"
 printf '\nBuilt: %s\n' "$ZDUO_APP"

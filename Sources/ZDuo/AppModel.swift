@@ -26,7 +26,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var sensorStatus = "正在查找传感器…"
     @Published private(set) var captureStatus = "效果已关闭"
     @Published private(set) var permissionGranted = false
-    @Published private(set) var effect = FoldEffect.identity
+    private(set) var effect = FoldEffect.identity
     @Published private(set) var fps = 0.0
     @Published private(set) var overlayVisible = false
     @Published var shortcutAvailable = true
@@ -35,6 +35,7 @@ final class AppModel: ObservableObject {
     private let sensor = LidSensor()
     private var lastSensorReading = Date.distantPast
     private var lastTick = Date()
+    private var lastPanelUpdate = Date.distantPast
     private var smoother = AngleSmoother()
     private var timer: Timer?
     private var screen: NSScreen?
@@ -163,7 +164,11 @@ final class AppModel: ObservableObject {
         let sensorAvailable = now.timeIntervalSince(lastSensorReading) < 1
         let target = inputMode == .simulated ? simulatedAngle : (rawAngle ?? referenceAngle)
         let smoothed = smoother.update(target: target, deltaTime: dt) ?? referenceAngle
-        if abs(displayedAngle - smoothed) > 0.005 { displayedAngle = smoothed }
+        // 面板只需 15 Hz；透视参数仍每次 tick 更新，避免整棵 SwiftUI 视图随渲染刷新。
+        if now.timeIntervalSince(lastPanelUpdate) >= 1.0 / 15 {
+            if abs(displayedAngle - smoothed) > 0.005 { displayedAngle = smoothed }
+            lastPanelUpdate = now
+        }
 
         var availability = EffectAvailability()
         availability.enabled = enabled

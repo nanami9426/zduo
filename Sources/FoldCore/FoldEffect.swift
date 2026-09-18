@@ -12,11 +12,11 @@ public struct FoldSettings: Equatable {
 
 public struct FoldEffect: Equatable {
     public let progress: Double
-    public let rotation: Double
+    public let closure: Double
     public let blur: Double
-    public var isVisible: Bool { rotation > 0.0001 || blur > 0.0001 }
+    public var isVisible: Bool { closure > 0.0001 || blur > 0.0001 }
 
-    public static let identity = FoldEffect(progress: 0, rotation: 0, blur: 0)
+    public static let identity = FoldEffect(progress: 0, closure: 0, blur: 0)
 
     public static func calculate(angle: Double, settings: FoldSettings) -> FoldEffect? {
         guard angle.isFinite, (0...180).contains(angle),
@@ -26,9 +26,9 @@ public struct FoldEffect: Equatable {
         let difference = max(0, settings.referenceAngle - angle)
         let progress = min(1, difference / (settings.referenceAngle - 15))
         let eased = progress * progress * (3 - 2 * progress)
-        // 限制补偿角度，防止接近合盖时投影奇点导致翻转。离焦继续随开合增强。
+        // closure 是带强度的合盖进度，不再把物理开合重复施加为虚拟卡片旋转。
         return FoldEffect(progress: progress,
-                          rotation: min(55, difference) * .pi / 180 * settings.strength,
+                          closure: progress * settings.strength,
                           blur: eased * settings.strength)
     }
 
@@ -39,12 +39,13 @@ public struct FoldEffect: Equatable {
 
     /// 与 shader 相同的逆投影，用于检验参考角度处恒等、铰链固定和数值稳定。
     public func sourceCoordinate(x: Double, yFromHinge: Double) -> (x: Double, y: Double) {
-        let eyeDistance = 2.4
-        let eyeHeight = 0.55
-        let sine = sin(rotation)
-        let denominator = max(0.2, eyeDistance * cos(rotation) + (eyeHeight - yFromHinge) * sine)
-        let y = yFromHinge * eyeDistance / denominator
-        let x = 0.5 + (x - 0.5) * (eyeDistance + y * sine) / eyeDistance
+        // 参考 Hinge 的满高度投影（MIT，见 THIRD_PARTY_NOTICES.md）。
+        // 顶部轻微收窄；从铰链向上截取原图，避免整幅桌面被压低成向后倒的卡片。
+        let v = 1 - yFromHinge
+        let taper = 0.30 * closure
+        let q = (1 + taper) / (1 + taper * v)
+        let y = cos(closure * .pi / 2 * 0.65) * (1 - v * q)
+        let x = 0.5 + (x - 0.5) * q
         return (x, y)
     }
 }
@@ -60,8 +61,12 @@ public struct AngleSmoother {
             return nil
         }
         guard let previous = value else { value = target; return target }
-        // 按时间而不是帧数平滑，在 30 Hz 采样和 60 Hz 渲染之间消除一度量化的跳动。
-        let weight = 1 - exp(-min(deltaTime, 0.25) / 0.055)
+        // 一度量化的小台阶需要跨帧展开；快速开合时缩短平滑，减少拖后。
+        // 依据当前跟随误差连续调整，不预测未来角度，停住和反向时不会过冲。
+        let motion = min(1, abs(target - previous) / 3)
+        let response = motion * motion * (3 - 2 * motion)
+        let timeConstant = 0.035 + (0.012 - 0.035) * response
+        let weight = 1 - exp(-min(deltaTime, 0.25) / timeConstant)
         let next = previous + (target - previous) * weight
         value = abs(next - target) < 0.01 ? target : next
         return value

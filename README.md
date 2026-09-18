@@ -35,8 +35,8 @@
 
 数据流：`IOKit 铰链传感器 / 模拟滑杆 → 角度平滑 → FoldCore 效果参数 → ScreenCaptureKit + Metal → 内置屏幕覆盖窗口`。
 
-- **角度**：匹配 Apple HID `Vendor 0x05AC / UsagePage 0x20 / Usage 0x8A`，读取 Feature Report 1，每秒约 30 次。传感器协议并非 Apple 公开承诺的接口，支持情况因机型而异。本机已验证可读取。
-- **平面**：以屏幕底部为铰链，用固定观察点做逆透视投影；补偿角度上限 55°，避免接近闭合时的数值奇点。
+- **角度**：匹配 Apple HID `Vendor 0x05AC / UsagePage 0x20 / Usage 0x8A`，读取 Feature Report 1，每秒约 30 次轮询，角度使用 12–35 ms 自适应平滑：小幅变化抑制量化台阶，较大变化加快跟随。传感器协议并非 Apple 公开承诺的接口，支持情况因机型而异。本机已验证可读取。
+- **平面**：参考 Hinge 的满高度投影，以底部为锚点，顶部仅轻微收窄（每侧最多约 11.54%）；随合盖裁去上部内容，避免叠加物理屏幕本身的倾斜，把桌面压成向后倒的卡片。这是视觉近似，并非严格的空间固定平面。
 - **离焦**：Metal Performance Shaders 在低分辨率纹理上计算多档高斯模糊，按开合角度和距铰链的距离逐像素混合。清晰层保留捕获分辨率，边界过渡使用模糊背景，避免硬黑边。
 - **外侧暗化**：虚拟屏幕以外的区域随合盖程度逐渐压暗，最大降低约 55% 的 RGB 强度；边缘柔和过渡，虚拟屏幕内部不额外变暗。
 - **物理屏幕磨砂**：在透视画面上叠加固定于物理屏幕的冷灰半透明质感，顶部最浓，向底部铰链渐淡；合盖时逐渐增强，打开时沿同一曲线退去。顶部混合比例最高约 44%，同时增强散射模糊，细颗粒固定不闪动，帮助区分前方屏幕表面与后方虚拟画面。
@@ -82,4 +82,4 @@ GPU 检查导出 110°、85°、60°、30°、15° 的 PNG，校验参考角度�
 - [Apple ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos/)：实时屏幕采集。
 - [LidAngle](https://github.com/deepakness/LidAngle)：HID 铰链传感器的公开实现参考。
 
-本项目独立实现，仅复用 Apple 系统框架。
+投影数学参考并改编自 [Noveum/hinge](https://github.com/Noveum/hinge)，其 MIT 许可见 `THIRD_PARTY_NOTICES.md`。运行时依赖 Apple 系统框架。
