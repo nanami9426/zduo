@@ -40,7 +40,13 @@ fragment float4 foldFragment(VertexOut in [[stage_in]],
     float sourceX = 0.5 + (in.uv.x - 0.5) * (distance + sourceY * s) / distance;
     float2 sourceUV = float2(sourceX, 1 - sourceY);
 
-    float amount = u.blur * (0.12 + 0.88 * y);
+    // 磨砂附着在物理屏幕上：用显示坐标 y，而非透视变换后的 sourceY。
+    // 从铰链处的透明过渡到顶部的磨砂；开合与反向打开共用同一角度曲线。
+    float fold = pow(saturate(u.blur), 0.65);
+    float surfaceGradient = pow(smoothstep(0.0, 1.0, y), 1.2);
+    float frostOpacity = 0.44 * fold * surfaceGradient;
+    float depthBlur = u.blur * (0.12 + 0.88 * y);
+    float amount = 1 - (1 - depthBlur) * (1 - frostOpacity * 0.85);
     float3 foreground = blurredColor(sourceUV, amount, sharp, soft, medium, deep);
     // 超出参考画面的区域延续边缘色，再融入模糊背景；避免黑色三角和硬裁切。
     float edge = min(min(sourceUV.x, 1 - sourceUV.x), min(sourceUV.y, 1 - sourceUV.y));
@@ -49,11 +55,17 @@ fragment float4 foldFragment(VertexOut in [[stage_in]],
     float3 background = blurredColor(clamp(sourceUV, float2(0), float2(1)),
                                     min(1.0, amount + u.blur * 0.7), sharp, soft, medium, deep);
     float3 color = mix(background, foreground, mix(1.0, boundary, saturate(u.rotation * 8)));
-    color = mix(color, float3(0.52), u.blur * 0.10);
     color *= 1 - u.blur * 0.045;
     // 仅压暗虚拟屏幕外侧；边缘柔和衔接，合盖越多越暗，内部画面亮度保持不变。
     float outside = 1 - smoothstep(-feather, 0.0, edge);
     float dimming = 0.55 * smoothstep(0.0, 0.75, u.rotation);
     color *= 1 - outside * dimming;
+
+    // 最后覆盖半透明冷灰磨砂层，保留后方内容；静态细颗粒固定在屏幕上，不随内容移动或闪烁。
+    float2 surfacePixel = floor(in.uv * float2(u.width, u.height));
+    float grain = fract(sin(dot(surfacePixel, float2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    float reflection = exp(-pow((y - 0.92) / 0.30, 2.0));
+    float3 frostTint = float3(0.64, 0.68, 0.73) + reflection * 0.055 + grain * 0.018;
+    color = mix(color, frostTint, frostOpacity);
     return float4(color, 1);
 }
